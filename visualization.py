@@ -1,0 +1,123 @@
+import warnings
+warnings.filterwarnings('ignore')
+import numpy as np
+import cv2
+from pytorch_grad_cam import GradCAM,GradCAMPlusPlus,LayerCAM,ScoreCAM,EigenCAM
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+from pytorch_grad_cam.utils.image import show_cam_on_image,preprocess_image
+from PIL import Image
+
+#def path2imgs(paths): #주어진 이미지 경로들을 이미지로 읽어옴.
+#    images = []
+#    for path in paths:
+#        img = np.array(Image.open(path))
+#        img = cv2.resize(img, (256, 256))
+#        img = np.float32(img) / 255
+#        images.append(img)
+#    return np.array(images) #(256,256,3) 인 이미지들들을 리스트로 묶어서 반환시킴
+
+
+class ShapeError(Exception):
+    def __str__(self):
+        return "테이블 크기와 입력 이미지 갯수가 맞지 않습니다"
+
+
+#concat images to one table image
+def make_table(images,shape): #images: list / shape: tuple 
+    """1. 행개수씩 이미지 리스트를 뽑아서 image들 hstack 해줌 (가로사이즈가 5면 인덱스를 0~4, 5~9 ... 가져옴)
+       2. hstack 한 이미지를 row_list에 담아줌  
+       3. 담은 row이미지들을 튜플로 묶어서 vstack 해줌"""
+       
+    if (shape[0])*(shape[1])!=len(images):
+        raise(ShapeError)
+
+    try:    
+        row_list=[]
+        for row_idx in range(shape[0]): #row_idx 는 0,1,2
+            image_table=images[row_idx*shape[1]] #이러면 images[0] [5] [10] 가져옴 
+            #맨처음 받는 image_table 이 행의 앞단이니까 여기에 원본 사진을 받아주면된다.
+            
+            for col_idx in range((row_idx*shape[1])+1,(row_idx+1)*(shape[1])):
+                image_table=np.hstack((image_table, images[col_idx]))
+            row_list.append(image_table)
+        image_table=np.vstack(tuple(row_list))
+
+        return image_table
+    
+    except ShapeError as e:
+        print(e)       
+        
+#종류별 CAM사진을 리스트로 묶어주는 함수 
+def printCAM(label, images, model,target_layers,device="cpu"): #images: (256,256,3) 사이즈의 샘플이미지들 묶음(np형)
+#입력 레이어가 모델마다 다른 점을 감안하여 입력에 추가하여 사용자가 직접 입력하도록 변경
+#모델과 CAM에 들어가는 gpu 다르게 되는 부분 방지하기 위해 입력에 device 추가
+    
+    targets = [ClassifierOutputTarget(label)] 
+    cam_list=[]
+    for img in images:
+        cam_list.append(img)
+        input_tensor = preprocess_image(img,
+                                      mean=[0, 0, 0],
+                                        std=[1, 1, 1]) #이미지넷의 평균과 표준편차 적용된 것을 평균0 편차1로 수정
+        input_tensor=input_tensor.to(device)
+        
+        method=(GradCAM(model=model, target_layers=target_layers),LayerCAM(model=model, target_layers=target_layers),
+                EigenCAM(model=model, target_layers=target_layers),GradCAMPlusPlus(model=model, target_layers=target_layers),
+                ScoreCAM(model=model, target_layers=target_layers, use_cuda=True)) #score-cam 추가
+                
+        for i in range(len(method)):
+            with method[i] as cam:
+                grayscale_cams = cam(input_tensor=input_tensor, targets=targets) 
+                cam_out = show_cam_on_image(img, grayscale_cams[0, :], use_rgb=True)
+                cam_out = cam_out.astype(float) / 255
+            cam_list.append(cam_out)
+    
+    return np.array(cam_list) #이미지들 담긴 리스트 리턴
+
+#원본, 흑백캠,칼라캠, 원본+캠, 바운딩 박스 사진들을 리스트로 묶어주는 함수
+def diverse_CAM(label,images,model,CAMname,target_layers,device="cpu"): #images: shape 사이즈의 샘플이미지들 묶음(np형)
+#입력 레이어가 모델마다 다른 점을 감안하여 입력에 추가하여 사용자가 직접 입력하도록 변경
+#모델과 CAM에 들어가는 gpu 다르게 되는 부분 방지하기 위해 입력에 device 추가
+    targets = [ClassifierOutputTarget(label)] 
+    img_list=[]
+    for img in images:
+        img_list.append(img)
+        img2=img.copy() #나중에 바운딩 박스 표시할 이미지
+
+        input_tensor = preprocess_image(img,
+                                      mean=[0, 0, 0],
+                                        std=[1, 1, 1])
+        input_tensor=input_tensor.to(device)
+        
+        method={'gradCAM':GradCAM(model=model, target_layers=target_layers),
+                'layerCAM':LayerCAM(model=model, target_layers=target_layers),
+                'eigenCAM':EigenCAM(model=model, target_layers=target_layers),
+                'gradCAM++':GradCAMPlusPlus(model=model, target_layers=target_layers),
+                'scoreCAM':ScoreCAM(model=model, target_layers=target_layers, use_cuda=True)} #scorecam 추가
+        
+        with method[CAMname] as cam:
+            grayscale_cams = cam(input_tensor=input_tensor, targets=targets) 
+            cam_out = show_cam_on_image(img, grayscale_cams[0, :], use_rgb=True)
+        black_cam=cv2.merge([grayscale_cams[0,:],grayscale_cams[0,:],grayscale_cams[0,:]])
+        cam = np.uint8(255*grayscale_cams[0,:]) #흑백 캠을 표시해줌 (256,256)
+        colorcam=cv2.applyColorMap(np.uint8(255*black_cam), cv2.COLORMAP_JET)
+
+        colorcam=cv2.cvtColor(colorcam,cv2.COLOR_BGR2RGB)
+
+        thresh = cv2.threshold(cam, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1] #OTSU알고리즘으로 임계값 찾음
+        
+         #Find contours
+        cnts = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) #외곽선을 검출해줌
+        cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+        for c in cnts:
+            x,y,w,h = cv2.boundingRect(c)
+            cv2.rectangle(cam_out, (x, y), (x + w, y + h), (36,255,12), 2)
+            cv2.rectangle(img2, (x, y), (x + w, y + h), (1,0.9,0), 2)
+            
+        img_list.append(black_cam)
+        img_list.append(colorcam.astype(float) / 255)
+        img_list.append(cam_out.astype(float) / 255)
+        img_list.append(img2.astype(float))
+        
+        #print(img2)
+    return np.array(img_list),((x,y),(x + w, y + h)) #이미지들 모은 리스트 리턴

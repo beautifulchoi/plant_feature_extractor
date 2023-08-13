@@ -1,0 +1,7 @@
+.ipynb_checkpoints
+checkpoint*
+exp_ckpt
+checkpoints
+checkpoints/checkpoint.pt
+plantnet300K_species_id_2_name.jso
+*.pt
